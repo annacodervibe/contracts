@@ -45,14 +45,17 @@ export interface KeeperRpc {
   getNameEvents(startLedger: number, cursor?: string): Promise<EventPage>;
   /** liveUntilLedgerSeq of the persistent Name(hash) entry, or null if no live entry. */
   getNameLiveUntil(nameHash: string): Promise<number | null>;
-  /** Submit extend_name_ttl(name, extendTo) and wait for it to land. Returns the tx hash. */
+  /**
+   * Submit extend_name_ttl(name, extendTo) and wait for it to land. Returns the tx hash.
+   * `extendTo` is a TTL in ledgers counted from the current ledger (not a ledger sequence).
+   */
   extendName(name: string, extendTo: number): Promise<string>;
 }
 
 export interface KeeperOptions {
   /** Extend names whose remaining TTL (ledgers) is below this. */
   threshold: number;
-  /** Ledgers from now to extend to. */
+  /** TTL, in ledgers from now, to extend to (relative, not an absolute ledger). */
   extendTo: number;
   dryRun: boolean;
   /** First ledger to read events from (e.g. the contract deployment ledger). */
@@ -199,16 +202,20 @@ export async function runKeeper(
     dryRun: o.dryRun,
   };
 
-  const target = latestLedger + o.extendTo;
+  // The contract takes a relative TTL, so pass extendTo as is. Adding latestLedger here
+  // would count the current ledger twice and extend far past the requested window.
+  const liveUntilAfter = latestLedger + o.extendTo;
   for (const s of risky) {
     if (o.dryRun) {
-      log(`[dry-run] would extend "${s.name}" (remaining ${s.remaining}) to ledger ${target}`);
+      log(
+        `[dry-run] would extend "${s.name}" (remaining ${s.remaining}) by ${o.extendTo} ledgers, live until ~ledger ${liveUntilAfter}`,
+      );
       continue;
     }
     try {
-      const txHash = await rpc.extendName(s.name, target);
+      const txHash = await rpc.extendName(s.name, o.extendTo);
       report.extended.push({ name: s.name, txHash });
-      log(`extended "${s.name}" to ledger ${target} (tx ${txHash})`);
+      log(`extended "${s.name}" by ${o.extendTo} ledgers, live until ~ledger ${liveUntilAfter} (tx ${txHash})`);
     } catch (e) {
       throw new KeeperError(
         'submission',

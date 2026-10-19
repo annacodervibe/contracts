@@ -10,7 +10,7 @@ Soroban contract storage entries have a TTL (Time-To-Live). Entries that aren't 
 
 1. **Enumerate names.** The contract keeps no on-chain name list, so the keeper rebuilds it from the contract's `register`, `update` and `release` events (Soroban RPC `getEvents`, starting at `--start-ledger`) and/or from an off-chain index file (`--index-file`, a JSON array of names, e.g. exported from `examples/indexer`). Both sources are merged.
 2. **Read TTLs.** For each name it reads the persistent `Name(sha256(name))` ledger entry via `getLedgerEntries` and computes `liveUntilLedgerSeq - latestLedger`.
-3. **Extend.** Names with remaining TTL below `--threshold` get a real `extend_name_ttl(name, latest + extend-to)` transaction (simulated, signed, submitted and polled to completion).
+3. **Extend.** Names with remaining TTL below `--threshold` get a real `extend_name_ttl(name, extend-to)` transaction (simulated, signed, submitted and polled to completion).
 
 ## Fails closed
 
@@ -88,7 +88,7 @@ tsx scripts/keeper/keeper.ts cost-estimate --names-count 1000
 | `--start-ledger` | - | First ledger to scan events from (deployment ledger) |
 | `--index-file` | - | JSON array of names from an off-chain index |
 | `--threshold` | 17280 | Extend when remaining TTL is below this (ledgers, ~1 day) |
-| `--extend-to` | 518400 | Ledgers from now to extend to (~30 days) |
+| `--extend-to` | 518400 | TTL in ledgers from now to extend to (~30 days). Passed to the contract as a relative TTL, so the name ends up live until `current ledger + extend-to` (capped by the network max entry TTL) |
 | `--secret-key` | - | Keeper account secret key |
 | `--dry-run` | false | Show actions without executing |
 | `--rpc-url` | network default | Custom Soroban RPC URL |
@@ -121,7 +121,7 @@ Topics:
   - symbol: "extend"
   - name_hash: BytesN<32>
 Data:
-  - extend_to_ledger: u32
+  - extend_to: u32   // TTL in ledgers from the ledger the call ran in, not a ledger sequence
 ```
 
 These events can be monitored to track Keeper activity.
@@ -142,7 +142,7 @@ Example output:
 latest ledger 123456
 found 42 registered name(s)
 15/42 below threshold 17280
-extended "alice" to ledger 641856 (tx 9f1c...)
+extended "alice" by 518400 ledgers, live until ~ledger 641856 (tx 9f1c...)
 ...
 done: 42 names, 15 below threshold, 15 extended
 ```

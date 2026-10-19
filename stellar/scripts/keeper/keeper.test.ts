@@ -26,6 +26,8 @@ function fakeRpc(opts: {
   failLatest?: boolean;
 }) {
   const extendCalls: { name: string; to: number }[] = [];
+  // Mutable so the fake can model the contract: extend_name_ttl(name, to) takes a TTL
+  // relative to the current ledger and tops the entry up to LATEST + to.
   const ttlByHash = new Map(
     Object.entries(opts.liveUntil ?? {}).map(([n, v]) => [nameHash(n), v] as const),
   );
@@ -48,10 +50,13 @@ function fakeRpc(opts: {
     extendName: async (name, to) => {
       if (opts.failExtendFor === name) throw new Error('tx failed');
       extendCalls.push({ name, to });
+      const h = nameHash(name);
+      const current = ttlByHash.get(h) ?? 0;
+      if (current - LATEST < to) ttlByHash.set(h, LATEST + to);
       return `tx-${name}`;
     },
   };
-  return { rpc, extendCalls };
+  return { rpc, extendCalls, liveUntilOf: (n: string) => ttlByHash.get(nameHash(n)) };
 }
 
 const ev = (kind: DecodedEvent['kind'], name: string): DecodedEvent => ({ ledger: 10, kind, name });
@@ -123,18 +128,30 @@ describe('enumeration', () => {
 });
 
 describe('ttl reads and extension', () => {
-  it('extends only names below the threshold, to latest + extendTo', async () => {
+  it('extends only names below the threshold, passing extendTo as a relative TTL', async () => {
     const { rpc, extendCalls } = fakeRpc({
       pages: [page([ev('register', 'alice'), ev('register', 'bob'), ev('register', 'carol')])],
       liveUntil: { alice: LATEST + 500, bob: LATEST + 5000, carol: LATEST + 999 },
     });
     const report = await runKeeper(rpc, base);
     expect(extendCalls).toEqual([
-      { name: 'alice', to: LATEST + 500_000 },
-      { name: 'carol', to: LATEST + 500_000 },
+      { name: 'alice', to: 500_000 },
+      { name: 'carol', to: 500_000 },
     ]);
     expect(report.atRisk).toBe(2);
     expect(report.extended.map((e) => e.txHash)).toEqual(['tx-alice', 'tx-carol']);
+  });
+
+  it('the resulting liveUntil is latest + extendTo, not latest counted twice', async () => {
+    const { rpc, extendCalls, liveUntilOf } = fakeRpc({
+      pages: [page([ev('register', 'alice')])],
+      liveUntil: { alice: LATEST + 500 },
+    });
+    await runKeeper(rpc, base);
+    const sent = extendCalls[0].to;
+    expect(sent).toBe(base.extendTo);
+    expect(sent).toBeLessThan(LATEST); // a relative TTL, never an absolute ledger
+    expect(liveUntilOf('alice')! - LATEST).toBe(base.extendTo);
   });
 
   it('treats remaining == threshold as healthy', async () => {
