@@ -23,12 +23,15 @@ export class KeeperError extends Error {
   }
 }
 
-/** A contract event, already decoded from XDR to plain values. */
-export interface DecodedEvent {
-  ledger: number;
-  kind: 'register' | 'update' | 'release';
-  name: string;
-}
+/**
+ * A contract event, already decoded from XDR to plain values.
+ *
+ * `register`, `update` and `release` carry the plaintext name. `bulk` is the aggregate
+ * `bulk_reg` event of `bulk_register`, which carries only sha256 name hashes (hex).
+ */
+export type DecodedEvent =
+  | { ledger: number; kind: 'register' | 'update' | 'release'; name: string }
+  | { ledger: number; kind: 'bulk'; hashes: string[] };
 
 export interface EventPage {
   events: DecodedEvent[];
@@ -106,9 +109,16 @@ export function validateOptions(o: KeeperOptions): void {
  * release removes); indexed names are merged in afterwards. If the event scan was
  * requested but the RPC no longer holds events back to `startLedger`, the history
  * is incomplete and we refuse to continue rather than silently skip names.
+ *
+ * `bulk_register` publishes a per-name `register` event for every name and then one
+ * aggregate `bulk_reg` event with only the name hashes. The aggregate is used as a
+ * cross-check: every hash it lists must be matched by a name learned from events or
+ * the index, otherwise a name exists that this run cannot extend (extend_name_ttl takes
+ * the name, not its hash), so the run fails instead of reporting success.
  */
 export async function enumerateNames(rpc: KeeperRpc, o: KeeperOptions): Promise<string[]> {
   const names = new Set<string>();
+  const bulkHashes = new Set<string>();
 
   if (o.startLedger !== undefined) {
     let cursor: string | undefined;
@@ -125,8 +135,14 @@ export async function enumerateNames(rpc: KeeperRpc, o: KeeperOptions): Promise<
         }
         first = false;
         for (const ev of page.events) {
-          if (ev.kind === 'release') names.delete(ev.name);
-          else names.add(ev.name);
+          if (ev.kind === 'bulk') {
+            for (const h of ev.hashes) bulkHashes.add(h);
+          } else if (ev.kind === 'release') {
+            names.delete(ev.name);
+            bulkHashes.delete(nameHash(ev.name));
+          } else {
+            names.add(ev.name);
+          }
         }
         cursor = page.cursor;
       } while (cursor);
@@ -137,6 +153,19 @@ export async function enumerateNames(rpc: KeeperRpc, o: KeeperOptions): Promise<
   }
 
   for (const n of o.indexedNames ?? []) names.add(n);
+
+  const known = new Set([...names].map(nameHash));
+  const unresolved = [...bulkHashes].filter((h) => !known.has(h)).sort();
+  if (unresolved.length > 0) {
+    const shown = unresolved.slice(0, 5).join(', ');
+    throw new KeeperError(
+      'enumeration',
+      `${unresolved.length} name hash(es) from bulk_register events have no known name (${shown}` +
+        `${unresolved.length > 5 ? ', ...' : ''}); extend_name_ttl needs the name itself. ` +
+        'Supply an --index-file that lists them.',
+    );
+  }
+
   return [...names].sort();
 }
 

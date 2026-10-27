@@ -59,7 +59,7 @@ function fakeRpc(opts: {
   return { rpc, extendCalls, liveUntilOf: (n: string) => ttlByHash.get(nameHash(n)) };
 }
 
-const ev = (kind: DecodedEvent['kind'], name: string): DecodedEvent => ({ ledger: 10, kind, name });
+const ev = (kind: 'register' | 'update' | 'release', name: string): DecodedEvent => ({ ledger: 10, kind, name });
 const page = (events: DecodedEvent[], cursor?: string): EventPage => ({
   events,
   cursor,

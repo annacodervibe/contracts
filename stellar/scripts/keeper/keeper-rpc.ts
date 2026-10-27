@@ -2,7 +2,9 @@
  * Soroban RPC implementation of KeeperRpc.
  *
  * Name enumeration comes from the contract's own `register`, `update` and `release`
- * events (the contract keeps no on-chain name list). Remaining TTL is read from the
+ * events (the contract keeps no on-chain name list). `bulk_register` also emits one
+ * `bulk_reg` event listing the name hashes; it is decoded so the core can cross-check it.
+ * Remaining TTL is read from the
  * persistent `Name(sha256(name))` ledger entry via getLedgerEntries.
  */
 
@@ -21,6 +23,46 @@ import {
 import { DecodedEvent, EventPage, KeeperRpc, nameHash } from './keeper-core';
 
 const EVENT_PAGE_LIMIT = 200;
+
+/** The parts of an RPC event the keeper reads. */
+export interface RawContractEvent {
+  ledger: number;
+  topic: xdr.ScVal[];
+  value: xdr.ScVal;
+}
+
+/**
+ * Decode raw contract events into the keeper's view. Events that do not concern name
+ * enumeration (pause, extend, metric, ...) are skipped; a recognised event with an
+ * unexpected payload throws rather than being ignored.
+ */
+export function decodeNameEvents(raw: RawContractEvent[]): DecodedEvent[] {
+  const out: DecodedEvent[] = [];
+  for (const ev of raw) {
+    const kind = scValToNative(ev.topic[0]);
+    if (kind === 'bulk_reg') {
+      const value = scValToNative(ev.value);
+      if (!Array.isArray(value) || !value.every((h) => h instanceof Uint8Array && h.length === 32)) {
+        throw new Error(`unexpected bulk_reg event payload at ledger ${ev.ledger}`);
+      }
+      out.push({
+        ledger: ev.ledger,
+        kind: 'bulk',
+        hashes: value.map((h: Uint8Array) => Buffer.from(h).toString('hex')),
+      });
+      continue;
+    }
+    if (kind !== 'register' && kind !== 'update' && kind !== 'release') continue;
+    const value = scValToNative(ev.value);
+    // register/update: (name, meta_address); release: name
+    const name = Array.isArray(value) ? value[0] : value;
+    if (typeof name !== 'string') {
+      throw new Error(`unexpected ${kind} event payload at ledger ${ev.ledger}`);
+    }
+    out.push({ ledger: ev.ledger, kind, name });
+  }
+  return out;
+}
 
 export class SorobanKeeperRpc implements KeeperRpc {
   private server: rpc.Server;
@@ -56,18 +98,7 @@ export class SorobanKeeperRpc implements KeeperRpc {
         ? { filters, cursor, limit: EVENT_PAGE_LIMIT }
         : { filters, startLedger, limit: EVENT_PAGE_LIMIT },
     );
-    const events: DecodedEvent[] = [];
-    for (const ev of resp.events) {
-      const kind = scValToNative(ev.topic[0]);
-      if (kind !== 'register' && kind !== 'update' && kind !== 'release') continue;
-      const value = scValToNative(ev.value);
-      // register/update: (name, meta_address); release: name
-      const name = Array.isArray(value) ? value[0] : value;
-      if (typeof name !== 'string') {
-        throw new Error(`unexpected ${kind} event payload at ledger ${ev.ledger}`);
-      }
-      events.push({ ledger: ev.ledger, kind, name });
-    }
+    const events = decodeNameEvents(resp.events);
     return {
       events,
       cursor: resp.events.length >= EVENT_PAGE_LIMIT ? resp.cursor : undefined,
